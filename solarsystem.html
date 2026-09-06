@@ -1523,15 +1523,18 @@
     scene.add(new THREE.Points(starGeo, new THREE.PointsMaterial({ color: 0xffffff, size: 0.7, sizeAttenuation: true })));
 
     // Lights — the Sun is the only real source, so planets show a true day/night
-    // terminator like in real life (dim ambient so the night sides fall dark, and
-    // the point light positioned at the Sun keeps the day sides brightly lit).
-    // The brightness slider (40–200%) scales both together, keeping the terminator
-    // contrast while letting users brighten dim night sides or darken the glare.
-    const AMBIENT_BASE = 0.42;
-    const SUN_BASE = 7.0;
+    // terminator like in real life. Surface brightness from the Sun is the same at
+    // every planet in reality (the 1/r² dimming of the light exactly cancels the
+    // 1/r² shrinking of the disk), so decay:0 keeps every day side equally bright —
+    // Earth, Neptune and the comet all read the same. A modest blue ambient lifts
+    // the night sides enough to see surface detail while the terminator stays clear.
+    // The brightness slider (40–200%) scales both lights together.
+    const AMBIENT_BASE = 0.5;
+    const SUN_BASE = 1.6;
     const ambientLight = new THREE.AmbientLight(0x22334d, AMBIENT_BASE);
     scene.add(ambientLight);
     const sunLight = new THREE.PointLight(0xfff2d0, SUN_BASE, 1400);
+    sunLight.decay = 0;
     scene.add(sunLight);
 
 
@@ -2061,7 +2064,11 @@
     // a=17.83 AU, e=0.967 — a very eccentric ellipse that dives inside Venus's orbit
     // at perihelion (0.586 AU, last seen 1986) and swings out beyond Neptune (~35 AU).
     const COMET = {
-      a: 17.83414, e: 0.967143, I: 162.26, wBar: 111.33, O: 58.42, L0: 38.38,
+      a: 17.83414, e: 0.967143, I: 162.26, wBar: 111.33, O: 58.42,
+      // Mean anomaly at J2000 is 66.4° (perihelion was 1986 Feb 9), so L0 = wBar + M0.
+      // Mean motion n = 360° / (period × 365.25 d), applied per Julian century below.
+      L0: 111.33 + 66.4,
+      nPerDay: 360 / (75.3 * 365.25),
       periodYrs: 75.3
     };
     function cometAU(T) {
@@ -2069,7 +2076,7 @@
       const I = THREE.MathUtils.degToRad(COMET.I);
       const O = THREE.MathUtils.degToRad(COMET.O);
       const wBar = THREE.MathUtils.degToRad(COMET.wBar);
-      const L = THREE.MathUtils.degToRad(((COMET.L0 + 0.0472167 * 365.25 * T) % 360 + 360) % 360);
+      const L = THREE.MathUtils.degToRad(((COMET.L0 + COMET.nPerDay * 36525 * T) % 360 + 360) % 360);
       let M = (L - wBar + 2 * Math.PI) % (2 * Math.PI);
       // Kepler's equation with a robust damped solve (high eccentricity needs care)
       let E = M + e * Math.sin(M);
@@ -2279,7 +2286,7 @@
       updateDayLabel();
     }
     dateInput.addEventListener('change', () => {
-      const t = dateInput.value + 'T12:00:00';
+      const t = dateInput.value + 'T12:00:00Z';
       if (dateInput.value) jumpTo(new Date(t));
     });
     nowBtn.addEventListener('click', () => {
@@ -2850,7 +2857,9 @@
         }
         m.trailTimer -= dt;
         if (m.trailTimer <= 0) {
-          m.trailTimer = m.isMeteor ? 0.016 : 0.03;
+          // Spawn trail particles on a small interval (not every frame) — keeps the
+          // fire trail looking continuous while cutting per-frame draw-call churn.
+          m.trailTimer = m.isMeteor ? 0.032 : 0.05;
           // fire trail (thicker for meteors) + dark smoke kicked off behind the rock
           const t = new THREE.Mesh(new THREE.SphereGeometry(m.isMeteor ? 0.16 : 0.09, 6, 6),
             new THREE.MeshBasicMaterial({ color: m.isMeteor ? 0xff8833 : 0xffaa55, transparent: true, depthWrite: false }));
@@ -2872,6 +2881,7 @@
           toast(`${evt.emoji} ${evt.label} strike on ${m.planet.planet.name}! (${Math.round(m.power * 100)}% power)`, '#' + m.planet.planet.color.toString(16).padStart(6, '0'));
           scene.remove(m.proj);
           m.proj.material.dispose();
+          m.proj.geometry.dispose();
           missiles.splice(i, 1);
           exitTargeting();
         }
@@ -2881,7 +2891,7 @@
         f.life -= dt;
         f.mesh.material.opacity = Math.max(f.life / f.maxLife, 0);
         if (f.grow) f.mesh.scale.multiplyScalar(1 + f.grow * dt);
-        if (f.life <= 0) { scene.remove(f.mesh); f.mesh.material.dispose(); worldFx.splice(i, 1); }
+        if (f.life <= 0) { scene.remove(f.mesh); f.mesh.material.dispose(); f.mesh.geometry.dispose(); worldFx.splice(i, 1); }
       }
     }
 
@@ -3125,7 +3135,7 @@
       effects.length = 0;
       for (const m of missiles) { scene.remove(m.proj); m.proj.material.dispose(); }
       missiles.length = 0;
-      for (const f of worldFx) { scene.remove(f.mesh); f.mesh.material.dispose(); }
+      for (const f of worldFx) { scene.remove(f.mesh); f.mesh.material.dispose(); f.mesh.geometry.dispose(); }
       worldFx.length = 0;
       for (const cloud of debrisClouds) {
         for (const c of cloud) { scene.remove(c.mesh); c.mesh.geometry.dispose(); c.mesh.material.dispose(); }
@@ -3509,8 +3519,11 @@
         const cometPos = cometAU(T);
         cometGroup.position.copy(cometPos);
         const dir = cometPos.clone().normalize(); // away from the Sun
-        const tailLen = Math.min(Math.max(2.5, cometPos.length() * 0.09), 20);
-        const ap = cometPos.clone().addScaledVector(dir, -tailLen); // tail tip
+        // Real comet tails grow near perihelion and shrink at aphelion, so the tail
+        // length is inversely related to solar distance (long in the inner system,
+        // stubby far out) — while staying clearly visible at any point in the orbit.
+        const tailLen = Math.min(Math.max(2.5, 3 + 9 * Math.pow(6.2 / (cometPos.length() + 3.2), 1.5)), 15);
+        const ap = cometPos.clone().addScaledVector(dir, tailLen); // tail tip, anti-sunward
         const tmp = new THREE.Vector3();
         for (let i = 0; i < tailCount; i++) {
           const f = i / (tailCount - 1);
