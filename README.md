@@ -5,4 +5,5 @@ a simple space simulation to learn about our solar system, and explode planets
 expected launch - **2026-09-06 at 8:00pm MTD**
 
 helpdesk- aadidevprasanth12@yahoo.com
+Updates will come every 30th of a month.
 
